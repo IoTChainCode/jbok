@@ -9,10 +9,10 @@ object Namespaces {
   val BlockBody: ByteVector = "b".utf8Bytes
   val NodeNamespace: ByteVector = "n".utf8Bytes
   val CodeNamespace: ByteVector = "c".utf8Bytes
-  val TotalDifficultyNamespace: ByteVector = "t".utf8Bytes
+  val TotalDifficulty: ByteVector = "t".utf8Bytes
   val AppStateNamespace: ByteVector = "s".utf8Bytes
   val KnownNodesNamespace: ByteVector = "k".utf8Bytes
   val Heights: ByteVector = "i".utf8Bytes
-  val FastSyncStateNamespace: ByteVector = "h".utf8Bytes
+  val FastSync: ByteVector = "h".utf8Bytes
   val TransactionLocation: ByteVector = "l".utf8Bytes
 }
