@@ -8,6 +8,7 @@ import jbok.crypto.authds.mpt.{MPTrie, Node}
 import jbok.persistent.{KeyValueDB, KeyValueStore}
 import scodec.bits.ByteVector
 import jbok.codec.codecs._
+import jbok.core.sync.SyncState
 
 class BlockHeaderStore[F[_]: Sync](db: KeyValueDB[F])
     extends KeyValueStore[F, ByteVector, BlockHeader](Namespaces.BlockHeader, db)
@@ -23,6 +24,20 @@ class BlockNumberHashStore[F[_]: Sync](db: KeyValueDB[F])
 
 class TransactionLocationStore[F[_]: Sync](db: KeyValueDB[F])
     extends KeyValueStore[F, ByteVector, TransactionLocation](Namespaces.TransactionLocation, db)
+
+class TotalDifficultyStore[F[_]: Sync](db: KeyValueDB[F])
+    extends KeyValueStore[F, ByteVector, BigInt](Namespaces.TotalDifficulty, db)
+
+class FastSyncStore[F[_]: Sync](db: KeyValueDB[F])
+    extends KeyValueStore[F, String, SyncState](Namespaces.FastSync, db) {
+  val syncStateKey: String = "fast-sync-state"
+
+  def getSyncState: F[Option[SyncState]] = getOpt(syncStateKey)
+
+  def putSyncState(syncState: SyncState): F[Unit] = put(syncStateKey, syncState)
+
+  def purge: F[Unit] = del(syncStateKey)
+}
 
 class AppStateStore[F[_]: Sync](db: KeyValueDB[F])
     extends KeyValueStore[F, String, ByteVector](Namespaces.AppStateNamespace, db) {
@@ -72,7 +87,10 @@ class AppStateStore[F[_]: Sync](db: KeyValueDB[F])
     encode(n).flatMap(v => put(SyncStartingBlock, v))
 }
 
-class MPTNodeStore[F[_]: Sync](val mpt: MPTrie[F])
+class EvmCodeStore[F[_]: Sync](db: KeyValueDB[F])
+    extends KeyValueStore[F, ByteVector, ByteVector](Namespaces.CodeNamespace, db)
+
+class AddressAccountStore[F[_]: Sync](val mpt: MPTrie[F])
     extends KeyValueStore[F, Address, Account](Namespaces.NodeNamespace, mpt) {
 
   def getRootHash: F[ByteVector] = mpt.getRootHash
@@ -86,9 +104,19 @@ class MPTNodeStore[F[_]: Sync](val mpt: MPTrie[F])
   def clear(): F[Unit] = mpt.clear()
 }
 
-object MPTNodeStore {
-  def apply[F[_]: Sync](db: KeyValueDB[F]): F[MPTNodeStore[F]] =
+object AddressAccountStore {
+  def apply[F[_]: Sync](db: KeyValueDB[F]): F[AddressAccountStore[F]] =
     for {
       trie <- MPTrie[F](db)
-    } yield new MPTNodeStore[F](trie)
+    } yield new AddressAccountStore[F](trie)
+}
+
+class ContractStorageStore[F[_]: Sync](val mpt: MPTrie[F])
+    extends KeyValueStore[F, UInt256, UInt256](ByteVector.empty, mpt)
+
+object ContractStorageStore {
+  def apply[F[_]: Sync](db: KeyValueDB[F], rootHash: ByteVector): F[ContractStorageStore[F]] =
+    for {
+      mpt <- MPTrie[F](db, rootHash)
+    } yield new ContractStorageStore[F](mpt)
 }
