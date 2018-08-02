@@ -6,7 +6,7 @@ name := "jbok"
 
 description := "Just a Bunch Of Keys"
 
-scalaVersion in ThisBuild := "2.12.4"
+scalaVersion in ThisBuild := "2.12.6"
 
 cancelable in Global := true
 
@@ -106,7 +106,7 @@ lazy val core = crossProject(JSPlatform, JVMPlatform)
       "com.github.pathikrit" %% "better-files" % "3.5.0"
     )
   )
-  .dependsOn(common % CompileAndTest, crypto, p2p, persistent)
+  .dependsOn(common % CompileAndTest, codec, crypto, p2p, persistent)
 
 lazy val coreJS = core.js
 lazy val coreJVM = core.jvm
@@ -148,7 +148,7 @@ lazy val p2pJS = p2p.js
 lazy val p2pJVM = p2p.jvm
 
 lazy val codec = crossProject(JSPlatform, JVMPlatform)
-  .crossType(CrossType.Pure)
+  .crossType(CrossType.Full)
   .settings(commonSettings)
   .jsSettings(commonJsSettings)
   .settings(
@@ -291,13 +291,13 @@ lazy val scalacOpts = scalacOptions := Seq(
 
 lazy val micrositeSettings = Seq(
   libraryDependencies += "com.47deg" %% "github4s" % "0.18.6",
-  micrositeName := "JBOK",
+  micrositeName := "jbok",
   micrositeBaseUrl := "/jbok",
   micrositeDescription := "Just a Bunch Of Keys",
-  micrositeAuthor := "Siyan",
-  micrositeGithubOwner := "Siyan",
+  micrositeAuthor := "siyan",
+  micrositeGithubOwner := "c-block",
   micrositeGithubRepo := "jbok",
-  micrositeDocumentationUrl := "https://....github.io/jbok",
+  micrositeDocumentationUrl := "https://c-block.github.io/jbok",
   micrositeFooterText := None,
   micrositeHighlightTheme := "atom-one-light",
   micrositePalette := Map(

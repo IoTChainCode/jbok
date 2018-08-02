@@ -11,6 +11,7 @@ import jbok.core.peer.PeerManager
 import jbok.network.NetAddress
 import jbok.network.execution._
 import scodec.bits.ByteVector
+import scala.concurrent.duration._
 
 trait PeerManageFixture extends BlockChainFixture {
   val N = 3
@@ -41,10 +42,10 @@ class PeerManagerSpec extends JbokSpec {
         _ <- connect
         peers <- peerManagers.traverse(_.getHandshakedPeers)
         _ = peers.map(_.size).sum shouldBe 4
-        _ <- stopAll
       } yield ()
 
-      p.unsafeRunSync()
+      p.attempt.unsafeRunSync()
+      stopAll.unsafeRunSync()
     }
 
     "create connections and send messages" in new PeerManageFixture {
@@ -59,10 +60,10 @@ class PeerManagerSpec extends JbokSpec {
           .compile
           .toList
         _ = e.map(_.message) shouldBe List.fill(2)(message)
-        _ <- stopAll
       } yield ()
 
-      p.unsafeRunSync()
+      p.attempt.unsafeRunTimed(5.seconds)
+      stopAll.unsafeRunSync()
     }
 
     "retry connections to remaining bootstrap nodes" ignore {}

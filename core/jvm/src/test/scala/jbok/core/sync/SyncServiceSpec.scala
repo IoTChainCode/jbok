@@ -7,6 +7,7 @@ import jbok.core.messages._
 import jbok.core.models.{BlockBody, BlockHeader}
 import jbok.network.execution._
 import scodec.bits._
+import scala.concurrent.duration._
 
 trait SyncServiceFixture extends PeerManageFixture {
   val blockchain = pm1.blockchain
@@ -33,10 +34,10 @@ class SyncServiceSpec extends JbokSpec {
         _ <- pm2.broadcast(GetReceipts(receiptsHashes))
         x <- pm2.subscribeMessages().take(1).compile.toList
         _ = x.head.message shouldBe receipts
-        _ <- stopAll
       } yield ()
 
-      p.unsafeRunSync()
+      p.attempt.unsafeRunTimed(5.seconds)
+      stopAll.unsafeRunSync()
     }
 
     "return BlockBodies by block hashes" in new SyncServiceFixture {
@@ -56,10 +57,10 @@ class SyncServiceSpec extends JbokSpec {
         _ <- pm2.broadcast(GetBlockBodies(blockBodiesHashes))
         x <- pm2.subscribeMessages().take(1).compile.toList
         _ = x.head.message shouldBe BlockBodies(blockBodies)
-        _ <- stopAll
       } yield ()
 
-      p.unsafeRunSync()
+      p.attempt.unsafeRunTimed(5.seconds)
+      stopAll.unsafeRunSync()
     }
 
     "return BlockHeaders by block number/hash" in new SyncServiceFixture {
@@ -82,11 +83,10 @@ class SyncServiceSpec extends JbokSpec {
         _ <- pm2.broadcast(GetBlockHeaders(Right(firstHeader.hash), 2, 0, reverse = false))
         x <- pm2.subscribeMessages().take(1).compile.toList
         _ = x.head.message shouldBe BlockHeaders(firstHeader :: secondHeader :: Nil)
-
-        _ <- stopAll
       } yield ()
 
-      p.unsafeRunSync()
+      p.attempt.unsafeRunTimed(5.seconds)
+      stopAll.unsafeRunSync()
     }
   }
 }
