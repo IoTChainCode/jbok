@@ -6,7 +6,7 @@ import java.security.SecureRandom
 import cats.effect.IO
 import jbok.core.messages.NewBlock
 import jbok.core.models._
-import jbok.crypto.signature.Ed25519
+import jbok.crypto.signature.ecdsa.SecP256k1
 import org.scalacheck.{Arbitrary, Gen}
 import scodec.bits.ByteVector
 
@@ -24,22 +24,24 @@ trait Gens {
 
   val bigIntGen: Gen[BigInt] = byteArrayOfNItemsGen(32).map(b => new BigInteger(1, b))
 
+  val bigInt64Gen: Gen[BigInt] = byteArrayOfNItemsGen(64).map(b => new BigInteger(1, b))
+
   def randomSizeByteArrayGen(minSize: Int, maxSize: Int): Gen[Array[Byte]] =
     Gen.choose(minSize, maxSize).flatMap(byteArrayOfNItemsGen(_))
 
   def byteArrayOfNItemsGen(n: Int): Gen[Array[Byte]] = Gen.listOfN(n, Arbitrary.arbitrary[Byte]).map(_.toArray)
 
   def randomSizeByteStringGen(minSize: Int, maxSize: Int): Gen[ByteVector] =
-    Gen.choose(minSize, maxSize).flatMap(byteStringOfLengthNGen)
+    Gen.choose(minSize, maxSize).flatMap(byteVectorOfLengthNGen)
 
-  def byteStringOfLengthNGen(n: Int): Gen[ByteVector] = byteArrayOfNItemsGen(n).map(ByteVector.apply)
+  def byteVectorOfLengthNGen(n: Int): Gen[ByteVector] = byteArrayOfNItemsGen(n).map(ByteVector.apply)
 
-  def listByteStringOfNItemsGen(n: Int): Gen[List[ByteVector]] = Gen.listOf(byteStringOfLengthNGen(n))
+  def listByteStringOfNItemsGen(n: Int): Gen[List[ByteVector]] = Gen.listOf(byteVectorOfLengthNGen(n))
 
   def hexPrefixDecodeParametersGen(): Gen[(Array[Byte], Boolean)] =
     for {
       aByteList <- Gen.nonEmptyListOf(Arbitrary.arbitrary[Byte])
-      t <- Arbitrary.arbitrary[Boolean]
+      t         <- Arbitrary.arbitrary[Boolean]
     } yield (aByteList.toArray, t)
 
   def keyValueListGen(): Gen[List[(Int, Int)]] =
@@ -50,8 +52,8 @@ trait Gens {
   def receiptGen: Gen[Receipt] =
     for {
       postTransactionStateHash <- byteArrayOfNItemsGen(32)
-      cumulativeGasUsed <- bigIntGen
-      logsBloomFilter <- byteArrayOfNItemsGen(256)
+      cumulativeGasUsed        <- bigIntGen
+      logsBloomFilter          <- byteArrayOfNItemsGen(256)
     } yield
       Receipt(
         postTransactionStateHash = ByteVector(postTransactionStateHash),
@@ -62,12 +64,12 @@ trait Gens {
 
   def transactionGen: Gen[Transaction] =
     for {
-      nonce <- bigIntGen
-      gasPrice <- bigIntGen
-      gasLimit <- bigIntGen
+      nonce            <- bigIntGen
+      gasPrice         <- bigIntGen
+      gasLimit         <- bigIntGen
       receivingAddress <- byteArrayOfNItemsGen(20).map(Address.apply)
-      value <- bigIntGen
-      payload <- byteStringOfLengthNGen(256)
+      value            <- bigIntGen
+      payload          <- byteVectorOfLengthNGen(256)
     } yield
       Transaction(
         nonce,
@@ -104,8 +106,8 @@ trait Gens {
 //  }
 
   def signedTxSeqGen(length: Int, secureRandom: SecureRandom, chainId: Option[Byte]): Gen[List[SignedTransaction]] = {
-    val senderKeys = Ed25519.generateKeyPair[IO].unsafeRunSync()
-    val txsSeqGen = Gen.listOfN(length, transactionGen)
+    val senderKeys = SecP256k1.generateKeyPair().unsafeRunSync()
+    val txsSeqGen  = Gen.listOfN(length, transactionGen)
     txsSeqGen.map { txs =>
       txs.map { tx =>
         SignedTransaction.sign(tx, senderKeys, chainId)
@@ -116,28 +118,28 @@ trait Gens {
   def newBlockGen(secureRandom: SecureRandom, chainId: Option[Byte]): Gen[NewBlock] =
     for {
       blockHeader <- blockHeaderGen
-      stxs <- signedTxSeqGen(10, secureRandom, chainId)
-      uncles <- listBlockHeaderGen
-      td <- bigIntGen
+      stxs        <- signedTxSeqGen(10, secureRandom, chainId)
+      uncles      <- listBlockHeaderGen
+      td          <- bigIntGen
     } yield NewBlock(Block(blockHeader, BlockBody(stxs, uncles)))
 
   def blockHeaderGen: Gen[BlockHeader] =
     for {
-      parentHash <- byteStringOfLengthNGen(32)
-      ommersHash <- byteStringOfLengthNGen(32)
-      beneficiary <- byteStringOfLengthNGen(20)
-      stateRoot <- byteStringOfLengthNGen(32)
-      transactionsRoot <- byteStringOfLengthNGen(32)
-      receiptsRoot <- byteStringOfLengthNGen(32)
-      logsBloom <- byteStringOfLengthNGen(50)
-      difficulty <- bigIntGen
-      number <- bigIntGen
-      gasLimit <- bigIntGen
-      gasUsed <- bigIntGen
-      unixTimestamp <- intGen.map(_.abs)
-      extraData <- byteStringOfLengthNGen(8)
-      mixHash <- byteStringOfLengthNGen(8)
-      nonce <- byteStringOfLengthNGen(8)
+      parentHash       <- byteVectorOfLengthNGen(32)
+      ommersHash       <- byteVectorOfLengthNGen(32)
+      beneficiary      <- byteVectorOfLengthNGen(20)
+      stateRoot        <- byteVectorOfLengthNGen(32)
+      transactionsRoot <- byteVectorOfLengthNGen(32)
+      receiptsRoot     <- byteVectorOfLengthNGen(32)
+      logsBloom        <- byteVectorOfLengthNGen(50)
+      difficulty       <- bigIntGen
+      number           <- bigIntGen
+      gasLimit         <- bigIntGen
+      gasUsed          <- bigIntGen
+      unixTimestamp    <- intGen.map(_.abs)
+      extraData        <- byteVectorOfLengthNGen(8)
+      mixHash          <- byteVectorOfLengthNGen(8)
+      nonce            <- byteVectorOfLengthNGen(8)
     } yield
       BlockHeader(
         parentHash = parentHash,

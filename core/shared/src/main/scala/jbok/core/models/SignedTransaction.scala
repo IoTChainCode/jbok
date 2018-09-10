@@ -1,20 +1,31 @@
 package jbok.core.models
 
-import cats.effect.IO
 import jbok.codec.rlp.RlpCodec
 import jbok.codec.rlp.codecs._
 import jbok.crypto._
-import jbok.crypto.signature.{CryptoSignature, KeyPair, SecP256k1, SignatureRecover}
+import jbok.crypto.signature.ecdsa.SecP256k1
+import jbok.crypto.signature.{KeyPair, CryptoSignature}
 import scodec.bits.ByteVector
 import shapeless._
 
 case class SignedTransaction(
-    tx: Transaction,
-    signature: CryptoSignature,
-    senderAddress: Address
+    nonce: BigInt,
+    gasPrice: BigInt,
+    gasLimit: BigInt,
+    receivingAddress: Address,
+    value: BigInt,
+    payload: ByteVector,
+    v: BigInt,
+    r: BigInt,
+    s: BigInt
 ) {
   lazy val hash: ByteVector =
     RlpCodec.encode(this).require.bytes.kec256
+
+  def senderAddress(chainId: Option[Byte]): Option[Address] =
+    SignedTransaction.getSender(this, chainId)
+
+  def isContractInit: Boolean = receivingAddress.equals(Address.empty)
 }
 
 object SignedTransaction {
@@ -24,12 +35,18 @@ object SignedTransaction {
       signatureRandom: ByteVector,
       signature: ByteVector,
       chainId: Byte
-  ): Option[SignedTransaction] = {
-    val txSig = CryptoSignature(BigInt(1, signatureRandom.toArray), BigInt(1, signature.toArray), Some(pointSign))
-    for {
-      sender <- SignedTransaction.getSender(tx, txSig, chainId)
-    } yield SignedTransaction(tx, txSig, sender)
-  }
+  ): SignedTransaction =
+    new SignedTransaction(
+      tx.nonce,
+      tx.gasPrice,
+      tx.gasLimit,
+      tx.receivingAddress.getOrElse(Address.empty),
+      tx.value,
+      tx.payload,
+      BigInt(1, Array(pointSign)),
+      BigInt(1, signatureRandom.toArray),
+      BigInt(1, signature.toArray)
+    )
 
   def apply(
       tx: Transaction,
@@ -38,46 +55,66 @@ object SignedTransaction {
       signature: ByteVector,
       address: Address
   ): SignedTransaction = {
-    val txSig = CryptoSignature(BigInt(1, signatureRandom.toArray), BigInt(1, signature.toArray), Some(pointSign))
-    SignedTransaction(tx, txSig, address)
+    val txSig = CryptoSignature(BigInt(1, signatureRandom.toArray), BigInt(1, signature.toArray), pointSign)
+    new SignedTransaction(
+      tx.nonce,
+      tx.gasPrice,
+      tx.gasLimit,
+      tx.receivingAddress.getOrElse(Address(ByteVector.empty)),
+      tx.value,
+      tx.payload,
+      BigInt(1, Array(pointSign)),
+      BigInt(1, signatureRandom.toArray),
+      BigInt(1, signature.toArray)
+    )
   }
 
-  def sign(tx: Transaction, keyPair: KeyPair, chainId: Option[Byte]): SignedTransaction = {
-    val bytes = bytesToSign(tx, chainId)
-    val sig = SecP256k1.sign[IO](bytes, keyPair).unsafeRunSync()
-    val pub = keyPair.public.uncompressed
-    val address = Address(pub.kec256)
-    SignedTransaction(tx, sig, address)
+  def sign(tx: Transaction, keyPair: KeyPair, chainId: Option[Byte] = None): SignedTransaction = {
+    val stx = new SignedTransaction(
+      tx.nonce,
+      tx.gasPrice,
+      tx.gasLimit,
+      tx.receivingAddress.getOrElse(Address(ByteVector.empty)),
+      tx.value,
+      tx.payload,
+      BigInt(0),
+      BigInt(0),
+      BigInt(0)
+    )
+    val bytes = bytesToSign(stx, chainId)
+    val sig   = SecP256k1.sign(bytes.toArray, keyPair, chainId).unsafeRunSync()
+    stx.copy(v = BigInt(1, Array(sig.v)), r = sig.r, s = sig.s)
   }
 
-  private def bytesToSign(tx: Transaction, chainId: Option[Byte]): ByteVector =
-    RlpCodec.encode(tx).require.bytes.kec256
-
-  private def getSender(tx: Transaction, signature: CryptoSignature, chainId: Byte): Option[Address] = {
-    val bytesToSign =
-      if (signature.v == Some(SignatureRecover.negativePointSign) || signature.v == Some(
-            SignatureRecover.positivePointSign)) {
-        generalTransactionBytes(tx)
-      } else {
-        chainSpecificTransactionBytes(tx, chainId)
-      }
-
-    for {
-      recoveredPublicKey <- SecP256k1.recoverPublic(signature, bytesToSign, Some(chainId))
-    } yield Address(recoveredPublicKey.uncompressed.kec256)
+  def verify(stx: SignedTransaction, chainId: Option[Byte], sender: Address): Boolean = {
+    val bytesToSign = SignedTransaction.bytesToSign(stx, chainId)
+    SignedTransaction.getSender(stx, chainId).contains(sender)
   }
 
-  private def generalTransactionBytes(tx: Transaction): ByteVector = {
-    val hlist = tx.nonce :: tx.gasPrice :: tx.gasLimit :: tx.receivingAddress
-      .map(_.bytes)
-      .getOrElse(ByteVector.empty) :: tx.value :: tx.payload :: HNil
-    RlpCodec.encode(hlist).require.bytes
+  private def bytesToSign(stx: SignedTransaction, chainId: Option[Byte]): ByteVector =
+    chainId match {
+      case Some(id) => chainSpecificTransactionBytes(stx, id)
+      case None     => generalTransactionBytes(stx)
+    }
+
+  private def recoverPublicKey(stx: SignedTransaction, chainId: Option[Byte]): Option[KeyPair.Public] = {
+    val bytesToSign = SignedTransaction.bytesToSign(stx, chainId)
+    val txSig       = CryptoSignature(stx.r, stx.s, stx.v.toByte)
+
+    SecP256k1.recoverPublic(bytesToSign.toArray, txSig, chainId)
   }
 
-  private def chainSpecificTransactionBytes(tx: Transaction, chainId: Byte): ByteVector = {
-    val hlist = tx.nonce :: tx.gasPrice :: tx.gasLimit :: tx.receivingAddress
-      .map(_.bytes)
-      .getOrElse(ByteVector.empty) :: tx.value :: tx.payload :: chainId :: BigInt(0) :: BigInt(0) :: HNil
-    RlpCodec.encode(hlist).require.bytes
+  private[jbok] def getSender(stx: SignedTransaction, chainId: Option[Byte] = None): Option[Address] =
+    SignedTransaction.recoverPublicKey(stx, chainId).map(pk => Address(pk.bytes.kec256))
+
+  private def generalTransactionBytes(stx: SignedTransaction): ByteVector = {
+    val hlist = stx.nonce :: stx.gasPrice :: stx.gasLimit :: stx.receivingAddress :: stx.value :: stx.payload :: HNil
+    RlpCodec.encode(hlist).require.bytes.kec256
+  }
+
+  private def chainSpecificTransactionBytes(stx: SignedTransaction, chainId: Byte): ByteVector = {
+    val hlist = stx.nonce :: stx.gasPrice :: stx.gasLimit :: stx.receivingAddress :: stx.value :: stx.payload :: chainId :: BigInt(
+      0) :: BigInt(0) :: HNil
+    RlpCodec.encode(hlist).require.bytes.kec256
   }
 }

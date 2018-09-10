@@ -1,5 +1,6 @@
 package jbok.codec.rlp
 
+import java.math.BigInteger
 import java.nio.charset.StandardCharsets
 
 import jbok.codec.rlp.RlpCodec.item
@@ -15,13 +16,16 @@ object codecs {
   implicit def deriveSet[A](implicit codec: Lazy[RlpCodec[A]]): RlpCodec[Set[A]] =
     RlpCodec.rlpset(codec.value)
 
+  implicit def deriveMap[A, B](implicit codec: Lazy[RlpCodec[List[(A, B)]]]): RlpCodec[Map[A, B]] =
+    codec.value.xmap[Map[A, B]](_.toMap, _.toList)
+
   implicit val hnilCodec: RlpCodec[HNil] = RlpCodec(
     PureCodec,
     new Codec[HNil] {
-      override def encode(value: HNil): Attempt[BitVector] = Attempt.successful(BitVector.empty)
-      override def sizeBound: SizeBound = SizeBound.exact(0)
+      override def encode(value: HNil): Attempt[BitVector]              = Attempt.successful(BitVector.empty)
+      override def sizeBound: SizeBound                                 = SizeBound.exact(0)
       override def decode(bits: BitVector): Attempt[DecodeResult[HNil]] = Attempt.successful(DecodeResult(HNil, bits))
-      override def toString = s"HNil"
+      override def toString                                             = s"HNil"
     }
   )
 
@@ -32,6 +36,11 @@ object codecs {
       case PureCodec | ItemCodec => RlpCodec(HListCodec, h.codec :: t.codec)
       case HListCodec            => RlpCodec(HListCodec, h.codec :: t.valueCodec)
     }
+  }
+
+  implicit final class HListSupportSingleton[A](val self: RlpCodec[A]) extends AnyVal {
+    def ::[B](codecB: RlpCodec[B]): RlpCodec[B :: A :: HNil] =
+      codecB :: self :: hnilCodec
   }
 
   implicit def deriveHList[A, L <: HList](implicit a: Lazy[RlpCodec[A]], l: RlpCodec[L]): RlpCodec[A :: L] =
@@ -85,20 +94,22 @@ object codecs {
         short => shortToBytes(short)
       ))
 
-  implicit val rulong: RlpCodec[Long] = item(ulong(63))
-
   implicit val rubigint: RlpCodec[BigInt] =
     item(bytes.xmap[BigInt](bytes => if (bytes.isEmpty) 0 else BigInt(1, bytes.toArray), bi => {
       val bytes = bi.toByteArray
       ByteVector(if (bytes.head == 0) bytes.tail else bytes)
     }))
 
+  implicit val rubiginteger: RlpCodec[BigInteger] = rubigint.xmap[BigInteger](_.underlying(), bi => BigInt(bi))
+
+  implicit val rulong: RlpCodec[Long] = rubigint.xmap[Long](_.toLong, BigInt.apply)
+
   implicit val rbool: RlpCodec[Boolean] = item(bool(8))
 
   implicit def roptional[A](implicit c: Lazy[RlpCodec[A]]): RlpCodec[Option[A]] =
     item(optional(bool(8), c.value.valueCodec))
 
-  implicit def reither[L, R](implicit cl: Lazy[RlpCodec[L]], cr: Lazy[RlpCodec[R]]) =
+  implicit def reither[L, R](implicit cl: Lazy[RlpCodec[L]], cr: Lazy[RlpCodec[R]]):RlpCodec[Either[L, R]] =
     item(either[L, R](bool(8), cl.value.valueCodec, cr.value.valueCodec))
 
   private def byteToBytes(byte: Byte): ByteVector =

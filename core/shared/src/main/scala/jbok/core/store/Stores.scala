@@ -4,7 +4,6 @@ import cats.data.OptionT
 import cats.effect.Sync
 import cats.implicits._
 import jbok.codec.rlp.codecs._
-import jbok.codec.rlp.RlpCodec._
 import jbok.core.models._
 import jbok.core.sync.SyncState
 import jbok.crypto.authds.mpt.{MPTrie, Node}
@@ -92,13 +91,15 @@ class EvmCodeStore[F[_]: Sync](db: KeyValueDB[F])
     extends KeyValueStore[F, ByteVector, ByteVector](Namespaces.CodeNamespace, db)
 
 class AddressAccountStore[F[_]: Sync](val mpt: MPTrie[F])
-    extends KeyValueStore[F, Address, Account](Namespaces.NodeNamespace, mpt) {
+    extends KeyValueStore[F, Address, Account](ByteVector.empty, mpt) {
 
   def getRootHash: F[ByteVector] = mpt.getRootHash
 
-  def getRoot: F[Node] = mpt.getRoot
+  def getRootOpt: F[Option[Node]] = mpt.getRootOpt
 
-  def getNodeByHash(hash: ByteVector): F[Node] = mpt.getNodeByHash(hash)
+  def getNodeByHash(hash: ByteVector): F[Option[Node]] = mpt.getNodeByHash(hash)
+
+  def putNode(hash: ByteVector, node: ByteVector): F[Unit] = mpt.put(hash, node)
 
   def size: F[Int] = mpt.size
 
@@ -106,9 +107,11 @@ class AddressAccountStore[F[_]: Sync](val mpt: MPTrie[F])
 }
 
 object AddressAccountStore {
-  def apply[F[_]: Sync](db: KeyValueDB[F]): F[AddressAccountStore[F]] =
+  def apply[F[_]: Sync](trie: MPTrie[F]): AddressAccountStore[F] = new AddressAccountStore[F](trie)
+
+  def apply[F[_]: Sync](db: KeyValueDB[F], root: Option[ByteVector] = None): F[AddressAccountStore[F]] =
     for {
-      trie <- MPTrie[F](db)
+      trie <- MPTrie[F](db, root)
     } yield new AddressAccountStore[F](trie)
 }
 
@@ -116,7 +119,7 @@ class ContractStorageStore[F[_]: Sync](val mpt: MPTrie[F])
     extends KeyValueStore[F, UInt256, UInt256](ByteVector.empty, mpt)
 
 object ContractStorageStore {
-  def apply[F[_]: Sync](db: KeyValueDB[F], rootHash: ByteVector): F[ContractStorageStore[F]] =
+  def apply[F[_]: Sync](db: KeyValueDB[F], rootHash: Option[ByteVector] = None): F[ContractStorageStore[F]] =
     for {
       mpt <- MPTrie[F](db, rootHash)
     } yield new ContractStorageStore[F](mpt)

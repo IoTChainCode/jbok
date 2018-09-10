@@ -1,11 +1,18 @@
-package jbok.network
-
-import fs2.Scheduler
-
-import scala.concurrent.ExecutionContext
-
-object JsExecution {
-  implicit val EC: ExecutionContext = scala.concurrent.ExecutionContext.Implicits.global
-
-  implicit val Sch: Scheduler = Scheduler.default
-}
+//package jbok.network
+//
+//import java.nio.channels.AsynchronousChannelGroup
+//
+//import fs2.Scheduler
+//import fs2.io.udp.AsynchronousSocketGroup
+//
+//import scala.concurrent.ExecutionContext
+//
+//object execution {
+//  implicit val EC: ExecutionContext = ExecutionContext.Implicits.global
+//
+//  implicit val Sch: Scheduler = ???
+//
+//  implicit val AG: AsynchronousChannelGroup = ???
+//
+//  implicit val AsyncSocketGroup: AsynchronousSocketGroup = ???
+//}

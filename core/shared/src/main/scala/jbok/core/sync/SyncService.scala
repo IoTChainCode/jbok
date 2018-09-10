@@ -4,7 +4,7 @@ import cats.effect.ConcurrentEffect
 import cats.implicits._
 import fs2._
 import fs2.async.mutable.Signal
-import jbok.core.BlockChain
+import jbok.core.History
 import jbok.core.messages._
 import jbok.core.peer.{PeerEvent, PeerId, PeerManager}
 
@@ -12,15 +12,14 @@ import scala.concurrent.ExecutionContext
 
 case class SyncService[F[_]](
                               peerManager: PeerManager[F],
-                              blockchain: BlockChain[F],
+                              blockchain: History[F],
                               stopWhenTrue: Signal[F, Boolean]
 )(implicit F: ConcurrentEffect[F], EC: ExecutionContext) {
   private[this] val log = org.log4s.getLogger
 
   def stream: Stream[F, Unit] =
-    peerManager.events
-      .subscribe(64)
-      .unNone
+    peerManager
+      .subscribe()
       .evalMap {
         case PeerEvent.PeerRecv(peerId, message) =>
           handleMessage(peerId, message).flatMap {
@@ -29,8 +28,14 @@ case class SyncService[F[_]](
           }
         case _ => F.unit
       }
+      .onFinalize(stopWhenTrue.set(true) *> F.delay(log.info(s"stop SyncService")))
 
-  def start: F[Unit] = stopWhenTrue.set(false) *> F.start(stream.interruptWhen(stopWhenTrue).compile.drain).void
+  def start: F[Unit] =
+    for {
+      _ <- stopWhenTrue.set(false)
+      _ <- F.start(stream.interruptWhen(stopWhenTrue).compile.drain).void
+      _ <- F.delay(log.info(s"start SyncService"))
+    } yield ()
 
   def stop: F[Unit] = stopWhenTrue.set(true)
 
@@ -75,7 +80,7 @@ case class SyncService[F[_]](
 }
 
 object SyncService {
-  def apply[F[_]](peerManager: PeerManager[F], blockchain: BlockChain[F])(implicit F: ConcurrentEffect[F],
-                                                                          EC: ExecutionContext): F[SyncService[F]] =
+  def apply[F[_]](peerManager: PeerManager[F], blockchain: History[F])(implicit F: ConcurrentEffect[F],
+                                                                       EC: ExecutionContext): F[SyncService[F]] =
     fs2.async.signalOf[F, Boolean](true).map(s => SyncService(peerManager, blockchain, s))
 }

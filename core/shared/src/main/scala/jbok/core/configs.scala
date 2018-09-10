@@ -4,21 +4,24 @@ import java.util.UUID
 
 import better.files.File._
 import better.files._
-import com.typesafe.config.Config
+import com.typesafe.config.{Config, ConfigFactory}
 import jbok.core.models.{Address, UInt256}
 import jbok.network.NetAddress
 import pureconfig.{ConfigReader, Derivation}
 import scodec.bits._
 
 import scala.concurrent.duration._
-import scala.util.Random
 
-package object configs {
+object Configs {
+  lazy val defaultConfig = ConfigFactory.load()
+
   implicit val bytesReader: ConfigReader[ByteVector] = ConfigReader[String].map(x => ByteVector.fromValidHex(x))
 
   implicit val byteReader: ConfigReader[Byte] = ConfigReader[Int].map(x => x.toByte)
 
-  def loadConfig[A](config: Config, namespace: String)(implicit ev: Derivation[ConfigReader[A]]) =
+  implicit val bigIntReader: ConfigReader[BigInt] = ConfigReader[String].map(x => BigInt(x))
+
+  def loadConfig[A](namespace: String, config: Config = defaultConfig)(implicit ev: Derivation[ConfigReader[A]]) =
     pureconfig.loadConfig[A](config, namespace)
 
   val defaultRootDir: File = home / ".jbok"
@@ -39,7 +42,8 @@ package object configs {
       maxIncomingPeers: Int = 10,
       maxPendingPeers: Int = 10,
       connectionTimeout: FiniteDuration = 5.seconds,
-      handshakeTimeout: FiniteDuration = 5.seconds
+      handshakeTimeout: FiniteDuration = 5.seconds,
+      timeout: FiniteDuration = 5.seconds
   )
 
   case class FullNodeConfig(
@@ -48,13 +52,14 @@ package object configs {
       keystore: KeyStoreConfig,
       peer: PeerManagerConfig,
       blockChainConfig: BlockChainConfig,
+      daoForkConfig: DaoForkConfig,
+      miningConfig: MiningConfig,
       nodeId: String = UUID.randomUUID().toString
   )
 
   case class BlockChainConfig(
       frontierBlockNumber: BigInt = 0,
       homesteadBlockNumber: BigInt = 1150000,
-      eip106BlockNumber: BigInt = BigInt("1000000000000000000"),
       eip150BlockNumber: BigInt = BigInt("2500000"),
       eip155BlockNumber: BigInt = BigInt("3000000"),
       eip160BlockNumber: BigInt = BigInt("3000000"),
@@ -136,17 +141,27 @@ package object configs {
 
   object FullNodeConfig {
     def apply(suffix: String, port: Int): FullNodeConfig = {
-      val rootDir = home / ".jbok" / suffix
-      val networkConfig = NetworkConfig(NetAddress("localhost", port), NetAddress("localhost", port + 1))
-      val walletConfig = KeyStoreConfig((rootDir / "keystore").pathAsString)
-      val peerManagerConfig = PeerManagerConfig(NetAddress("localhost", port))
-      val blockChainConfig: BlockChainConfig = ???
-      FullNodeConfig(rootDir.pathAsString, networkConfig, walletConfig, peerManagerConfig, blockChainConfig)
+      val rootDir                            = home / ".jbok" / suffix
+      val networkConfig                      = NetworkConfig(NetAddress("localhost", port), NetAddress("localhost", port))
+      val walletConfig                       = KeyStoreConfig((rootDir / "keystore").pathAsString)
+      val peerManagerConfig                  = PeerManagerConfig(NetAddress("localhost", port))
+      val blockChainConfig: BlockChainConfig = BlockChainConfig()
+      val daoForkConfig: DaoForkConfig       = DaoForkConfig()
+      val miningConfig                       = MiningConfig()
+      FullNodeConfig(
+        rootDir.pathAsString,
+        networkConfig,
+        walletConfig,
+        peerManagerConfig,
+        blockChainConfig,
+        daoForkConfig,
+        miningConfig
+      )
     }
 
-    def random(): FullNodeConfig = {
-      val i = Random.nextInt(20000) + 1
-      apply(s"test-${10000 + i}", 10000 + i)
-    }
+    def fill(size: Int): List[FullNodeConfig] =
+      (0 until size).toList.map(i => {
+        FullNodeConfig(s"test-${10000 + i}", 10000 + i)
+      })
   }
 }
