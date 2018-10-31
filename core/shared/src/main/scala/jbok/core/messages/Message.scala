@@ -2,31 +2,32 @@ package jbok.core.messages
 
 import jbok.codec.rlp.RlpCodec
 import jbok.codec.rlp.codecs._
-import scodec.Attempt
-import scodec.bits.ByteVector
+import jbok.network.common.{RequestId, RequestMethod}
+import scodec.bits.{BitVector, ByteVector}
+import scodec.{Attempt, Codec, DecodeResult, Decoder, Encoder, SizeBound}
 
 trait Message {
   def name = getClass.getSimpleName
 }
 
-object Messages {
+object Message {
   val codecMap = Map(
-    "Hello" -> RlpCodec[Hello],
-    "Status" -> RlpCodec[Status],
+    "Handshake"          -> RlpCodec[Handshake],
+    "Status"             -> RlpCodec[Status],
     "SignedTransactions" -> RlpCodec[SignedTransactions],
-    "GetReceipts" -> RlpCodec[GetReceipts],
-    "Receipts" -> RlpCodec[Receipts],
-    "GetBlockBodies" -> RlpCodec[GetBlockBodies],
-    "BlockBodies" -> RlpCodec[BlockBodies],
-    "GetBlockHeaders" -> RlpCodec[GetBlockHeaders],
-    "BlockHeaders" -> RlpCodec[BlockHeaders],
-    "NewBlock" -> RlpCodec[NewBlock],
-    "NewBlockHashes" -> RlpCodec[NewBlockHashes]
+    "GetReceipts"        -> RlpCodec[GetReceipts],
+    "Receipts"           -> RlpCodec[Receipts],
+    "GetBlockBodies"     -> RlpCodec[GetBlockBodies],
+    "BlockBodies"        -> RlpCodec[BlockBodies],
+    "GetBlockHeaders"    -> RlpCodec[GetBlockHeaders],
+    "BlockHeaders"       -> RlpCodec[BlockHeaders],
+    "NewBlock"           -> RlpCodec[NewBlock],
+    "NewBlockHashes"     -> RlpCodec[NewBlockHashes]
   )
 
   def encode(msg: Message): ByteVector =
     rstring.encode(msg.name).require.bytes ++ (msg.name match {
-      case "Hello"              => RlpCodec[Hello].encode(msg.asInstanceOf[Hello])
+      case "Handshake"          => RlpCodec[Handshake].encode(msg.asInstanceOf[Handshake])
       case "Status"             => RlpCodec[Status].encode(msg.asInstanceOf[Status])
       case "SignedTransactions" => RlpCodec[SignedTransactions].encode(msg.asInstanceOf[SignedTransactions])
       case "GetReceipts"        => RlpCodec[GetReceipts].encode(msg.asInstanceOf[GetReceipts])
@@ -44,11 +45,28 @@ object Messages {
     codecMap(name).decode(r.remainder).require.value.asInstanceOf[Message]
   }
 
-  def main(args: Array[String]): Unit = {
-    val status = Status(1, 1, ByteVector.empty, ByteVector.empty)
+  implicit val encoder: Encoder[Message] = new Encoder[Message] {
+    override def encode(value: Message): Attempt[BitVector] =
+      Attempt.successful(Message.encode(value).bits)
 
-    val bytes = encode(status)
-    val msg = decode(bytes).require
-    println(msg)
+    override def sizeBound: SizeBound = SizeBound.unknown
+  }
+
+  implicit val decoder: Decoder[Message] = new Decoder[Message] {
+    override def decode(bits: BitVector): Attempt[DecodeResult[Message]] =
+      Message.decode(bits.bytes).map(message => DecodeResult(message, BitVector.empty))
+  }
+
+  implicit val codec: Codec[Message] = Codec(encoder, decoder)
+
+  implicit val I: RequestId[Message] = new RequestId[Message] {
+    override def id(a: Message): Option[String] = a match {
+      case x: SyncMessage => Some(x.id)
+      case _              => None
+    }
+  }
+
+  implicit val M: RequestMethod[Message] = new RequestMethod[Message] {
+    override def method(a: Message): Option[String] = Some(a.name)
   }
 }

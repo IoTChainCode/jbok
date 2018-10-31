@@ -1,65 +1,55 @@
 package jbok.core.sync
 
-import cats.effect.Effect
+import cats.effect.{ConcurrentEffect, Timer}
 import cats.implicits._
-import jbok.core.messages.{BlockHash, NewBlock, NewBlockHashes}
-import jbok.core.peer.{HandshakedPeer, PeerId, PeerInfo, PeerManager}
+import jbok.common._
+import jbok.core.messages.{BlockHash, Message, NewBlock, NewBlockHashes}
+import jbok.core.peer.{Peer, PeerManager}
 
 import scala.util.Random
 
-class Broadcaster[F[_]](peerManager: PeerManager[F])(implicit F: Effect[F]) {
+case class Broadcaster[F[_]](peerManager: PeerManager[F])(implicit F: ConcurrentEffect[F], T: Timer[F]) {
   private[this] val log = org.log4s.getLogger
 
   def broadcastBlock(newBlock: NewBlock): F[Unit] =
     for {
-      peers <- peerManager.handshakedPeers
+      peers <- peerManager.connected
       _ <- if (peers.isEmpty) {
-        log.info(s"no handshaked peers, ignore broadcasting")
+        log.info(s"no peers, ignore broadcasting")
         F.unit
       } else {
-        broadcastBlock(newBlock, peers)
+        for {
+          peersWithoutBlock <- peers
+            .traverse { peer =>
+              (higherThanPeer(newBlock, peer) && !peer.hasBlock(newBlock.block.header.hash)).map {
+                case true  => Some(peer)
+                case false => None
+              }
+            }
+            .map(_.flatten)
+          _ <- broadcastNewBlock(newBlock, peersWithoutBlock)
+          _ <- broadcastNewBlockHash(newBlock, peersWithoutBlock)
+        } yield ()
       }
     } yield ()
 
-  def broadcastBlock(newBlock: NewBlock, peers: Map[PeerId, HandshakedPeer]): F[Unit] = {
-    val peersWithoutBlock = peers.collect {
-      case (peerId, peer) if shouldSendNewBlock(newBlock, peer.peerInfo) => peerId
-    }.toSet
+  private def higherThanPeer(newBlock: NewBlock, peer: Peer[F]): F[Boolean] =
+    peer.status.get.map(_.bestNumber < newBlock.block.header.number)
 
-    if (peersWithoutBlock.isEmpty) {
-      log.info(s"no worst peers, ignore broadcasting")
-      F.unit
-    } else {
-      log.info(s"broadcast newBlock to ${peersWithoutBlock.size} peers")
-      broadcastNewBlock(newBlock, peersWithoutBlock) *> broadcastNewBlockHash(newBlock, peersWithoutBlock)
-    }
+  private def broadcastNewBlock(newBlock: NewBlock, peers: List[Peer[F]], random: Boolean = false): F[Unit] = {
+    val selected: List[Peer[F]] = if (random) randomSelect(peers) else peers
+    log.info(s"selected ${selected.size} peers to broadcast block")
+    selected.traverse(_.conn.write[Message](newBlock)).void
   }
 
-  private def shouldSendNewBlock(newBlock: NewBlock, peerInfo: PeerInfo): Boolean =
-    newBlock.block.header.number > peerInfo.maxBlockNumber
+  private def broadcastNewBlockHash(newBlock: NewBlock, peers: List[Peer[F]]): F[Unit] =
+    peers.traverse { peer =>
+      val newBlockHeader = newBlock.block.header
+      val newBlockHashes = NewBlockHashes(BlockHash(newBlockHeader.hash, newBlockHeader.number) :: Nil)
+      peer.conn.write[Message](newBlockHashes)
+    }.void
 
-  private def broadcastNewBlock(newBlock: NewBlock, peers: Set[PeerId]): F[Unit] = {
-    val selected = randomSelect(peers)
-    log.info(s"random selected ${selected.size} peers to broadcast block")
-    selected.toList
-      .map { peerId =>
-        peerManager.sendMessage(peerId, newBlock)
-      }
-      .sequence
-      .void
-  }
-
-  private def broadcastNewBlockHash(newBlock: NewBlock, peers: Set[PeerId]): F[Unit] =
-    peers.toList
-      .map { peerId =>
-        val newBlockHeader = newBlock.block.header
-        val newBlockHashes = NewBlockHashes(BlockHash(newBlockHeader.hash, newBlockHeader.number) :: Nil)
-        peerManager.sendMessage(peerId, newBlockHashes)
-      }
-      .sequence
-      .void
-
-  private def randomSelect(peers: Set[PeerId]): Set[PeerId] = {
+  private def randomSelect(peers: List[Peer[F]]): List[Peer[F]] = {
     val numberOfPeersToSend = Math.sqrt(peers.size).toInt
     Random.shuffle(peers).take(numberOfPeersToSend)
   }

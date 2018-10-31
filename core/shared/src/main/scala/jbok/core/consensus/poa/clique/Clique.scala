@@ -1,7 +1,7 @@
 package jbok.core.consensus.poa.clique
 
 import cats.data.OptionT
-import cats.effect.Sync
+import cats.effect.{ConcurrentEffect, Sync}
 import cats.implicits._
 import jbok.codec.rlp.RlpCodec
 import jbok.codec.rlp.codecs._
@@ -9,8 +9,7 @@ import jbok.core.History
 import jbok.core.consensus.poa.clique.Clique._
 import jbok.core.models._
 import jbok.crypto._
-import jbok.crypto.signature.{CryptoSignature, KeyPair}
-import jbok.crypto.signature.ecdsa.SecP256k1
+import jbok.crypto.signature.{CryptoSignature, ECDSA, Signature}
 import jbok.persistent.{KeyValueDB, KeyValueStore, LruMap}
 import scodec.bits._
 
@@ -25,24 +24,23 @@ class Clique[F[_]](
     val store: SnapshotStore[F],
     val recents: LruMap[ByteVector, Snapshot],
     val proposals: Map[Address, Boolean], // Current list of proposals we are pushing
-    val keyPair: KeyPair
-)(implicit F: Sync[F]) {
-  val signer = Address(keyPair)
-
+    val signer: Address,
+    val sign: ByteVector => F[CryptoSignature]
+)(implicit F: ConcurrentEffect[F]) {
   private[this] val log = org.log4s.getLogger
 
   def readSnapshot(number: BigInt, hash: ByteVector): OptionT[F, Snapshot] = {
     // try to read snapshot from cache or db
-    log.info(s"try to read snapshot @ number ${number} from cache")
+    log.info(s"try to read snapshot${number} from cache")
     OptionT
       .fromOption[F](recents.get(hash)) // If an in-memory snapshot was found, use that
       .orElseF(
         if (number % checkpointInterval == 0) {
           // If an on-disk checkpoint snapshot can be found, use that
-          log.info(s"try to read snapshot @ number ${number} from db")
+          log.info(s"try to read snapshot${number} from db")
           Snapshot.loadSnapshot[F](store, hash)
         } else {
-          log.info(s"snapshot @ number ${number} not found in cache and db")
+          log.info(s"snapshot${number} not found in cache and db")
           F.pure(None)
         }
       )
@@ -52,7 +50,7 @@ class Clique[F[_]](
     log.info(s"making a genesis snapshot")
     for {
       genesis <- history.genesisHeader
-      n = (genesis.extraData.length - extraVanity).toInt / 20
+      n = (genesis.extraData.length - extraVanity - extraSeal).toInt / 20
       signers: Set[Address] = (0 until n)
         .map(i => Address(genesis.extraData.slice(i * 20 + extraVanity, i * 20 + extraVanity + 20)))
         .toSet
@@ -89,7 +87,6 @@ class Clique[F[_]](
           } else {
             // No explicit parents (or no more left), reach out to the database
             history.getBlockHeaderByHash(hash).map(header => header.get -> parents)
-//            chain.getHeader(hash, number).map(header => header -> parents)
           }
           snap <- snapshot(number - 1, h.parentHash, p, h :: headers)
         } yield snap
@@ -113,30 +110,37 @@ object Clique {
   val nonceAuthVote = hex"0xffffffffffffffff" // Magic nonce number to vote on adding a new signer
   val nonceDropVote = hex"0x0000000000000000" // Magic nonce number to vote on removing a signer.
 
-  def apply[F[_]: Sync](config: CliqueConfig, history: History[F], keyPair: KeyPair): Clique[F] =
+  def apply[F[_]: ConcurrentEffect](
+      config: CliqueConfig,
+      history: History[F],
+      signer: Address,
+      sign: ByteVector => F[CryptoSignature]
+  ): Clique[F] =
     new Clique[F](
       config,
       history,
       new SnapshotStore[F](history.db),
       new LruMap[ByteVector, Snapshot](inMemorySnapshots),
       Map.empty,
-      keyPair
+      signer,
+      sign
     )
 
   def fillExtraData(signers: List[Address]): ByteVector =
-    ByteVector.fill(32)(0.toByte) ++ signers.foldLeft(ByteVector.empty)(_ ++ _.bytes)
+    ByteVector.fill(extraVanity)(0.toByte) ++ signers.foldLeft(ByteVector.empty)(_ ++ _.bytes) ++ ByteVector.fill(
+      extraSeal)(0.toByte)
 
   def sigHash(header: BlockHeader): ByteVector = {
-    val bytes = RlpCodec.encode(header.copy(extraData = header.extraData.dropRight(65))).require.bytes
+    val bytes = RlpCodec.encode(header.copy(extraData = header.extraData.dropRight(extraSeal))).require.bytes
     bytes.kec256
   }
 
   def ecrecover(header: BlockHeader): Address = {
     // Retrieve the signature from the header extra-data
-    val signature = header.extraData.takeRight(65)
+    val signature = header.extraData.takeRight(extraSeal)
     val hash      = sigHash(header)
     val sig       = CryptoSignature(signature.toArray)
-    val public    = SecP256k1.recoverPublic(hash.toArray, sig, None).get
+    val public    = Signature[ECDSA].recoverPublic(hash.toArray, sig, None).get
     Address(public.bytes.kec256)
   }
 }

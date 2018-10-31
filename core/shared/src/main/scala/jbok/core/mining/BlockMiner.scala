@@ -3,7 +3,7 @@ package jbok.core.mining
 import cats.effect.ConcurrentEffect
 import cats.implicits._
 import fs2._
-import fs2.async.mutable.Signal
+import fs2.concurrent.SignallingRef
 import jbok.codec.rlp.RlpCodec
 import jbok.codec.rlp.codecs._
 import jbok.core.ledger.{BlockResult, BloomFilter}
@@ -11,7 +11,6 @@ import jbok.core.models._
 import jbok.core.sync.Synchronizer
 import jbok.core.utils.ByteUtils
 import jbok.crypto.authds.mpt.MPTrieStore
-import jbok.network.execution._
 import jbok.persistent.KeyValueDB
 import scodec.bits.ByteVector
 
@@ -19,9 +18,12 @@ case class BlockPreparationResult[F[_]](block: Block, blockResult: BlockResult[F
 
 class BlockMiner[F[_]](
     val synchronizer: Synchronizer[F],
-    val stopWhenTrue: Signal[F, Boolean]
+    val stopWhenTrue: SignallingRef[F, Boolean]
 )(implicit F: ConcurrentEffect[F]) {
+  private[this] val log = org.log4s.getLogger
+
   val history = synchronizer.history
+
   val executor = synchronizer.executor
 
   // sort and truncate transactions
@@ -82,9 +84,12 @@ class BlockMiner[F[_]](
       ommers: List[BlockHeader]
   ): F[Block] =
     for {
-      header           <- executor.consensus.prepareHeader(parent, ommers)
-      txs              <- prepareTransactions(stxs, header.gasLimit)
-      prepared         <- prepareBlock(header, BlockBody(txs, ommers))
+      header <- executor.consensus.prepareHeader(parent, ommers)
+      _ = log.info(s"prepared header: ${header}")
+      txs <- prepareTransactions(stxs, header.gasLimit)
+      _ = log.info(s"prepared txs: ${txs}")
+      prepared <- prepareBlock(header, BlockBody(txs, ommers))
+      _ = log.info(s"prepared block success")
       transactionsRoot <- calcMerkleRoot(prepared.block.body.transactionList)
       receiptsRoot     <- calcMerkleRoot(prepared.blockResult.receipts)
     } yield {
@@ -102,19 +107,33 @@ class BlockMiner[F[_]](
 
   // mine a prepared block
   def mine(block: Block): F[Option[Block]] =
-    executor.consensus.mine(block).attemptT.toOption.value
+    executor.consensus.mine(block).attempt.map {
+      case Left(e) =>
+        log.error(e)(s"mining for block(${block.header.number}) failed")
+        None
+      case Right(b) =>
+        Some(b)
+    }
+
+  def mine: F[Option[Block]] =
+    for {
+      parent <- executor.history.getBestBlock
+      _ = log.info(s"begin mine ${parent.header.number + 1}")
+      block    <- generateBlock(parent)
+      minedOpt <- mine(block)
+      _        <- minedOpt.fold(F.unit)(block => submitNewBlock(block))
+      _ = log.info("mine end")
+    } yield minedOpt
 
   // submit a newly mined block
   def submitNewBlock(block: Block): F[Unit] =
     synchronizer.handleMinedBlock(block)
 
   def miningStream: Stream[F, Block] =
-    (for {
-      parent <- Stream.eval(executor.history.getBestBlock)
-      block  <- Stream.eval(generateBlock(parent))
-      mined  <- Stream.eval(mine(block)).unNone
-      _      <- Stream.eval(submitNewBlock(mined))
-    } yield mined).onFinalize(stopWhenTrue.set(true))
+    Stream
+      .repeatEval(mine)
+      .unNone
+      .onFinalize(stopWhenTrue.set(true))
 
   def start: F[Unit] =
     stopWhenTrue.get.flatMap {
@@ -124,6 +143,8 @@ class BlockMiner[F[_]](
 
   def stop: F[Unit] =
     stopWhenTrue.set(true)
+
+  def isMining: F[Boolean] = stopWhenTrue.get.map(!_)
 
   //////////////////////////////
   //////////////////////////////
@@ -136,7 +157,9 @@ class BlockMiner[F[_]](
 
   def generateBlock(parent: Block): F[Block] =
     for {
-      stxs   <- synchronizer.txPool.getPendingTransactions.map(_.map(_.stx))
+      tx   <- synchronizer.txPool.getPendingTransactions
+      stxs <- synchronizer.txPool.getPendingTransactions.map(_.map(_.stx))
+      _ = log.debug(s"generate block number: ${parent.header.number}, stx")
       ommers <- synchronizer.ommerPool.getOmmers(parent.header.number + 1)
       block  <- generateBlock(parent, stxs, ommers)
     } yield block
@@ -162,7 +185,7 @@ class BlockMiner[F[_]](
 object BlockMiner {
   def apply[F[_]: ConcurrentEffect](
       synchronizer: Synchronizer[F]
-  ): F[BlockMiner[F]] = fs2.async.signalOf[F, Boolean](true).map { stopWhenTrue =>
+  ): F[BlockMiner[F]] = SignallingRef[F, Boolean](true).map { stopWhenTrue =>
     new BlockMiner[F](
       synchronizer,
       stopWhenTrue

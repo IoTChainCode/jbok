@@ -3,15 +3,13 @@ package jbok.core.sync
 import cats.effect.ConcurrentEffect
 import cats.implicits._
 import fs2._
-import fs2.async.mutable.Signal
+import fs2.concurrent.SignallingRef
 import jbok.core.ledger.BlockExecutor
 import jbok.core.ledger.BlockImportResult._
-import jbok.core.messages.{GetBlockHeaders, NewBlock, NewBlockHashes}
+import jbok.core.messages.{GetBlockHeaders, Message, NewBlock, NewBlockHashes}
 import jbok.core.models.Block
-import jbok.core.peer.{PeerEvent, PeerManager}
+import jbok.core.peer.PeerManager
 import jbok.core.pool.{OmmerPool, TxPool}
-
-import scala.concurrent.ExecutionContext
 
 case class Synchronizer[F[_]](
     peerManager: PeerManager[F],
@@ -19,53 +17,54 @@ case class Synchronizer[F[_]](
     txPool: TxPool[F],
     ommerPool: OmmerPool[F],
     broadcaster: Broadcaster[F],
-    stopWhenTrue: Signal[F, Boolean]
-)(implicit F: ConcurrentEffect[F], EC: ExecutionContext) {
+    stopWhenTrue: SignallingRef[F, Boolean]
+)(implicit F: ConcurrentEffect[F]) {
   private[this] val log = org.log4s.getLogger
 
   val history = executor.history
 
   def stream: Stream[F, Unit] =
-    peerManager
-      .subscribe()
+    peerManager.subscribe
       .evalMap {
-        case PeerEvent.PeerRecv(peerId, NewBlock(block)) =>
-          log.info(s"received NewBlock")
-          executor.importBlock(block).flatMap { br =>
-            log.info(s"import block result: ${br}")
+        case (peer, NewBlock(block)) =>
+          log.info(s"received NewBlock(${block.tag}) from ${peer.conn.remoteAddress}")
 
-            br match {
+          for {
+            _            <- peer.knownBlock(block.header.hash)
+            importResult <- executor.importBlock(block)
+            _ = log.info(s"${peerManager.config.bindAddr}: import block result: ${importResult}")
+            _ <- importResult match {
               case Succeed(newBlocks, _) =>
-                log.info(s"Added new block ${block.header.number} to the top of the chain received from $peerId")
+                log.info(s"Added new ${block.tag} to the top of the chain received from ${peer.id}")
                 broadcastBlocks(newBlocks) *> updateTxAndOmmerPools(newBlocks, Nil)
 
               case Pooled =>
-                F.delay(log.info(s"queued block ${block.header.number}"))
+                F.delay(log.info(s"pooled ${block.tag}"))
 
               case Failed(error) =>
                 F.delay(log.info(s"importing block error: ${error}"))
             }
-          }
+          } yield ()
 
-        case PeerEvent.PeerRecv(peerId, NewBlockHashes(hashes)) =>
+        case (peer, NewBlockHashes(hashes)) =>
           val request = GetBlockHeaders(Right(hashes.head.hash), hashes.length, 0, reverse = false)
-          peerManager.sendMessage(peerId, request)
+          peer.conn.write[Message](request)
 
         case _ => F.unit
       }
-      .onFinalize(stopWhenTrue.set(true) *> F.delay(log.info(s"stop RegularSync")))
+      .onFinalize(stopWhenTrue.set(true) *> F.delay(log.info(s"Synchronizer stopped")))
 
   def handleMinedBlock(block: Block): F[Unit] =
     executor.importBlock(block).flatMap {
       case Succeed(newBlocks, _) =>
-        log.info(s"Mined block at ${block.header.number} added to the top of the chain")
+        log.info(s"add mined ${block.tag} to the main chain")
         broadcastBlocks(newBlocks) *> updateTxAndOmmerPools(newBlocks, Nil)
 
       case Pooled =>
-        F.delay(log.info(s"Mined block added to the pool"))
+        F.delay(log.info(s"add mined ${block.tag} to the pool"))
 
-      case Failed(error) =>
-        F.delay(log.error(s"Mined block execution error: ${error}"))
+      case Failed(e) =>
+        F.delay(log.error(e)(s"add mined ${block.tag} execution error"))
     }
 
   def start: F[Unit] =
@@ -100,8 +99,8 @@ object Synchronizer {
       txPool: TxPool[F],
       ommerPool: OmmerPool[F],
       broadcaster: Broadcaster[F],
-  )(implicit F: ConcurrentEffect[F], EC: ExecutionContext): F[Synchronizer[F]] =
-    fs2.async
-      .signalOf[F, Boolean](true)
-      .map(s => Synchronizer(peerManager, executor, txPool, ommerPool, broadcaster, s))
+  )(implicit F: ConcurrentEffect[F]): F[Synchronizer[F]] =
+    for {
+      s <- SignallingRef[F, Boolean](true)
+    } yield Synchronizer(peerManager, executor, txPool, ommerPool, broadcaster, s)
 }

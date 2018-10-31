@@ -9,6 +9,7 @@ import jbok.crypto.signature.KeyPair
 import jbok.crypto.signature.ecdsa.SecP256k1
 import jbok.persistent.KeyValueDB
 import scodec.bits.ByteVector
+import jbok.common.execution._
 
 import scala.collection.mutable
 
@@ -22,13 +23,12 @@ case class Test(signers: List[String], votes: List[TestVote], results: List[Stri
 
 trait SnapshotFixture {
   def mkHistory(signers: List[Address]) = {
-    val bytes   = signers.foldLeft(ByteVector.empty)(_ ++ _.bytes)
-    val extra   = ByteVector.fill(Clique.extraVanity)(0.toByte) ++ bytes
+    val extra   = Clique.fillExtraData(signers)
     val header  = Genesis.header.copy(extraData = extra)
     val block   = Genesis.block.copy(header = header)
     val db      = KeyValueDB.inMemory[IO].unsafeRunSync()
     val history = History[IO](db).unsafeRunSync()
-    history.loadGenesis(Some(block)).unsafeRunSync()
+    history.loadGenesisBlock(Some(block)).unsafeRunSync()
     history
   }
 
@@ -80,7 +80,8 @@ class SnapshotSpec extends JbokSpec {
     val head           = headers.last
     val db             = KeyValueDB.inMemory[IO].unsafeRunSync()
     val keyPair        = SecP256k1.generateKeyPair().unsafeRunSync()
-    val clique         = Clique[IO](config, history, keyPair)
+    val sign           = (bv: ByteVector) => SecP256k1.sign(bv.toArray, keyPair)
+    val clique         = Clique[IO](config, history, Address(keyPair), sign)
     val snap           = clique.snapshot(head.number, head.hash, headers).unsafeRunSync()
     val updatedSigners = snap.getSigners
     import Snapshot.addressOrd
@@ -114,9 +115,21 @@ class SnapshotSpec extends JbokSpec {
         List(TestVote("A", "B", auth = true), TestVote("B"), TestVote("A", "C", auth = true)),
         List("A", "B")
       )
-      for (i <- 1 to 10) {
-        check(test)
-      }
+      check(test)
+    }
+
+    "two singers, continuous signing" in {
+      val test = Test(
+        List("A", "B"),
+        List(
+          TestVote("A", "C", auth = true),
+          TestVote("B", "D", auth = true),
+          TestVote("A", "C", auth = true),
+          TestVote("B", "D", auth = true)
+        ),
+        List("A", "B")
+      )
+      check(test)
     }
 
     "two signers, voting to add three others (only accept first two, third needs 3 votes already)" in {

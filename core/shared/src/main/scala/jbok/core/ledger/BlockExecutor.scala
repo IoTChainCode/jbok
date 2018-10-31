@@ -2,10 +2,10 @@ package jbok.core.ledger
 
 import cats.Foldable
 import cats.data.Kleisli
-import cats.effect.Sync
+import cats.effect.{ConcurrentEffect, Sync}
 import cats.implicits._
-import jbok.core.Configs.BlockChainConfig
 import jbok.core.History
+import jbok.core.config.Configs.BlockChainConfig
 import jbok.core.consensus.{Consensus, ConsensusResult}
 import jbok.core.models.UInt256._
 import jbok.core.models._
@@ -32,21 +32,61 @@ object BlockImportResult {
 
 class BlockExecutor[F[_]](
     val config: BlockChainConfig,
-    val history: History[F],
-    val blockPool: BlockPool[F],
     val consensus: Consensus[F],
     val commonHeaderValidator: CommonHeaderValidator[F],
     val commonBlockValidator: BlockValidator[F],
     val txValidator: TransactionValidator[F],
     val vm: VM
-)(implicit F: Sync[F]) {
+)(implicit F: ConcurrentEffect[F]) {
   private[this] val log = org.log4s.getLogger
 
-  def simulateTransaction(stx: SignedTransaction, blockHeader: BlockHeader): F[TxResult[F]] =
-    ???
+  val history = consensus.history
+  val blockPool = consensus.blockPool
+
+  def simulateTransaction(stx: SignedTransaction, blockHeader: BlockHeader): F[TxResult[F]] = {
+    val stateRoot = blockHeader.stateRoot
+
+    val gasPrice      = UInt256(stx.gasPrice)
+    val gasLimit      = stx.gasLimit
+    val vmConfig      = EvmConfig.forBlock(blockHeader.number, config)
+    val senderAddress = getSenderAddress(stx, blockHeader.number)
+
+    for {
+      _       <- txValidator.validateSimulateTx(stx)
+      world1  <- history.getWorldStateProxy(blockHeader.number, config.accountStartNonce, Some(stateRoot))
+      world2  <- updateSenderAccountBeforeExecution(senderAddress, stx, world1)
+      context <- prepareProgramContext(stx, blockHeader, world2, vmConfig)
+      result  <- runVM(stx, context, vmConfig)
+      totalGasToRefund = calcTotalGasToRefund(stx, result)
+    } yield {
+      log.info(
+        s"""SimulateTransaction(${stx.hash.toHex.take(7)}) execution end with ${result.error} error.
+           |result.returnData: ${result.returnData.toHex}
+           |gas refund: ${totalGasToRefund}""".stripMargin
+      )
+
+      TxResult(result.world, gasLimit - totalGasToRefund, result.logs, result.returnData, result.error)
+    }
+  }
 
   def binarySearchGasEstimation(stx: SignedTransaction, blockHeader: BlockHeader): F[BigInt] =
     ???
+
+  // FIXME
+  def importBlocks(blocks: List[Block], imported: List[Block] = Nil): F[List[Block]] =
+    blocks match {
+      case Nil =>
+        F.pure(imported)
+
+      case block :: tail =>
+        importBlock(block).flatMap {
+          case BlockImportResult.Succeed(_, _) =>
+            importBlocks(tail, block :: imported)
+
+          case _ =>
+            importBlocks(tail, imported)
+        }
+    }
 
   def importBlock(block: Block): F[BlockImportResult] =
     for {
@@ -55,10 +95,13 @@ class BlockExecutor[F[_]](
       consensusResult <- consensus.run(parent, block)
       importResult <- consensusResult match {
         case ConsensusResult.BlockInvalid(e) =>
+          log.info(s"import block failed")
           F.pure(BlockImportResult.Failed(e))
         case ConsensusResult.ImportToTop =>
+          log.info(s"should import to top")
           importBlockToTop(block, parent.header.number, currentTd)
         case ConsensusResult.Pooled =>
+          log.info(s"should import to pool")
           blockPool.addBlock(block, parent.header.number).map(_ => BlockImportResult.Pooled)
       }
     } yield importResult
@@ -67,6 +110,7 @@ class BlockExecutor[F[_]](
     for {
       topBlockHash <- blockPool.addBlock(block, bestBlockNumber).map(_.get.hash)
       topBlocks    <- blockPool.getBranch(topBlockHash, dequeue = true)
+      _ = log.info(s"execute top blocks: ${topBlocks.map(_.tag)}")
       result <- executeBlocks(topBlocks, currentTd).attempt.map {
         case Left(e) =>
           BlockImportResult.Failed(e)
@@ -94,13 +138,13 @@ class BlockExecutor[F[_]](
       minerAccount <- getAccountToPay(minerAddress, world)
       minerReward  <- consensus.calcBlockMinerReward(block.header.number, block.body.uncleNodesList.size)
       afterMinerReward = world.putAccount(minerAddress, minerAccount.increaseBalance(UInt256(minerReward)))
-      _                = log.info(s"Paying block-${block.header.number} reward of $minerReward to miner $minerAddress")
+      _                = log.info(s"paying ${block.tag} reward of $minerReward to miner $minerAddress")
       world <- Foldable[List].foldLeftM(block.body.uncleNodesList, afterMinerReward) { (ws, ommer) =>
         val ommerAddress = Address(ommer.beneficiary)
         for {
           account     <- getAccountToPay(ommerAddress, ws)
           ommerReward <- consensus.calcOmmerMinerReward(block.header.number, ommer.number)
-          _ = log.info(s"Paying block-${block.header.number} reward of $ommerReward to ommer $ommerAddress")
+          _ = log.info(s"paying ${block.tag} reward of $ommerReward to ommer $ommerAddress")
         } yield ws.putAccount(ommerAddress, account.increaseBalance(UInt256(ommerReward)))
       }
     } yield world
@@ -136,31 +180,31 @@ class BlockExecutor[F[_]](
         parentStateRoot,
         EvmConfig.forBlock(block.header.number, config).noEmptyAccounts
       )
+      _ = log.info(s"parentStateRoot: ${parentStateRoot}, ${world}")
       result <- executeTransactions(block.body.transactionList, block.header, world, shortCircuit = shortCircuit)
     } yield result
 
-  def executeBlocks(blocks: List[Block], parentTd: BigInt): F[List[Block]] = {
-    log.info(s"start executing ${blocks.length} blocks")
+  def executeBlocks(blocks: List[Block], parentTd: BigInt): F[List[Block]] =
     blocks match {
       case block :: tail =>
         executeBlock(block, alreadyValidated = true).attempt.flatMap {
           case Right(receipts) =>
-            log.info(s"execute block ${block.header.hash.toHex.take(7)} succeed")
+            log.info(s"execute ${block.tag} succeed")
             val td = parentTd + block.header.difficulty
             for {
-              _              <- history.save(block, receipts, td, saveAsBestBlock = true)
+              _ <- history.save(block, receipts, td, saveAsBestBlock = true)
+              _ = log.info(s"saved ${block.tag} as the best block")
               executedBlocks <- executeBlocks(tail, td)
             } yield block :: executedBlocks
 
           case Left(error) =>
-            log.info(s"execute block ${block.header.hash.toHex.take(7)} failed")
+            log.error(error)(s"execute ${block.tag} failed")
             F.raiseError(error)
         }
 
       case Nil =>
         F.pure(Nil)
     }
-  }
 
   def executeTransactions(
       stxs: List[SignedTransaction],
@@ -184,6 +228,8 @@ class BlockExecutor[F[_]](
           .getOrElse((Account.empty(UInt256.Zero), world.putAccount(senderAddress, Account.empty(UInt256.Zero))))
 
         upfrontCost = calculateUpfrontCost(stx)
+        _ = log.info(
+          s"stx: ${stx}, senderAccount: ${senderAccount}, header: ${header}, upfrontCost: ${upfrontCost}, accGas ${accGas}")
         _ <- txValidator.validate(stx, senderAccount, header, upfrontCost, accGas)
         result <- executeTransaction(stx, header, worldForTx).attempt.flatMap {
           case Left(e) =>
@@ -259,6 +305,7 @@ class BlockExecutor[F[_]](
     } yield {
       log.info(
         s"""Transaction(${stx.hash.toHex.take(7)}) execution end with ${result.error} error.
+           |returndata: ${result.returnData.toHex}
            |gas refund: ${totalGasToRefund}, gas paid to miner: ${executionGasToPayToMiner}""".stripMargin
       )
 
@@ -287,7 +334,8 @@ class BlockExecutor[F[_]](
     val senderAddress = getSenderAddress(stx, blockHeader.number)
     if (stx.isContractInit) {
       for {
-        address  <- world.createAddress(senderAddress)
+        address <- world.createAddress(senderAddress)
+        _ = log.debug(s"contract address: ${address}")
         conflict <- world.nonEmptyCodeOrNonceAccount(address)
         code = if (conflict) ByteVector(INVALID.code) else stx.payload
         world1 <- world
@@ -319,14 +367,19 @@ class BlockExecutor[F[_]](
     val maxCodeSizeExceeded = config.maxCodeSize.exists(codeSizeLimit => contractCode.size > codeSizeLimit)
     val codeStoreOutOfGas   = result.gasRemaining < codeDepositCost
 
+    log.debug(
+      s"codeDepositCost: ${codeDepositCost}, maxCodeSizeExceeded: ${maxCodeSizeExceeded}, codeStoreOutOfGas: ${codeStoreOutOfGas}")
     if (maxCodeSizeExceeded || (codeStoreOutOfGas && config.exceptionalFailedCodeDeposit)) {
       // Code size too big or code storage causes out-of-gas with exceptionalFailedCodeDeposit enabled
+      log.debug("putcode outofgas")
       result.copy(error = Some(OutOfGas))
     } else if (codeStoreOutOfGas && !config.exceptionalFailedCodeDeposit) {
       // Code storage causes out-of-gas with exceptionalFailedCodeDeposit disabled
+      log.debug("putcode outofgas or exceptionalFailedCodeDeposite")
       result
     } else {
       // Code storage succeeded
+      log.debug(s"address putcode: ${address}")
       result.copy(gasRemaining = result.gasRemaining - codeDepositCost,
                   world = result.world.putCode(address, result.returnData))
     }
@@ -356,12 +409,12 @@ class BlockExecutor[F[_]](
     UInt256(stx.gasLimit * stx.gasPrice)
 
   private def calcTotalGasToRefund(stx: SignedTransaction, result: ProgramResult[F]): BigInt =
-    if (result.error.isDefined) {
-      0
-    } else {
+    if (result.error.isEmpty || result.error.contains(RevertOp)) {
       val gasUsed = stx.gasLimit - result.gasRemaining
       // remaining gas plus some allowance
       result.gasRemaining + (gasUsed / 2).min(result.gasRefund)
+    } else {
+      0
     }
 
   private def deleteAccounts(addressesToDelete: Set[Address])(
@@ -382,18 +435,14 @@ class BlockExecutor[F[_]](
 }
 
 object BlockExecutor {
-  def apply[F[_]: Sync](
+  def apply[F[_]: ConcurrentEffect](
       config: BlockChainConfig,
-      history: History[F],
-      blockPool: BlockPool[F],
       consensus: Consensus[F]
   ): BlockExecutor[F] =
     new BlockExecutor[F](
       config,
-      history,
-      blockPool,
       consensus,
-      new CommonHeaderValidator[F](history),
+      new CommonHeaderValidator[F](consensus.history),
       new BlockValidator[F](),
       new TransactionValidator[F](config),
       new VM

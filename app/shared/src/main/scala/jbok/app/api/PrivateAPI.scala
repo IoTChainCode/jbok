@@ -1,14 +1,8 @@
 package jbok.app.api
 
 import cats.effect.IO
-import jbok.app.api.impl.PrivateApiImpl
-import jbok.core.Configs.BlockChainConfig
-import jbok.core.keystore.{KeyStore, Wallet}
 import jbok.core.models.{Address, Transaction}
-import jbok.core.History
-import jbok.core.pool.TxPool
-import jbok.crypto.signature.CryptoSignature
-import jbok.network.rpc.RpcAPI
+import jbok.crypto.signature._
 import scodec.bits.ByteVector
 
 import scala.concurrent.duration.Duration
@@ -37,45 +31,27 @@ case class TransactionRequest(
     )
 }
 
-trait PrivateAPI extends RpcAPI {
-  def importRawKey(privateKey: ByteVector, passphrase: String): Response[Address]
+trait PrivateAPI {
+  def importRawKey(privateKey: ByteVector, passphrase: String): IO[Address]
 
-  def newAccount(passphrase: String): Response[Address]
+  def newAccount(passphrase: String): IO[Address]
 
-  def delAccount(address: Address): Response[Boolean]
+  def delAccount(address: Address): IO[Boolean]
 
-  def listAccounts: Response[List[Address]]
+  def listAccounts: IO[List[Address]]
 
-  def unlockAccount(address: Address, passphrase: String, duration: Option[Duration]): Response[Boolean]
+  def unlockAccount(address: Address, passphrase: String, duration: Option[Duration]): IO[Boolean]
 
-  def lockAccount(address: Address): Response[Boolean]
+  def lockAccount(address: Address): IO[Boolean]
 
-  def sign(message: ByteVector, address: Address, passphrase: Option[String]): Response[CryptoSignature]
+  def sign(message: ByteVector, address: Address, passphrase: Option[String]): IO[CryptoSignature]
 
-  def ecRecover(message: ByteVector, signature: CryptoSignature): Response[Address]
+  def ecRecover(message: ByteVector, signature: CryptoSignature): IO[Address]
 
-  def sendTransaction(tx: TransactionRequest, passphrase: Option[String]): Response[ByteVector]
+  def sendTransaction(tx: TransactionRequest, passphrase: Option[String]): IO[ByteVector]
 
-  def deleteWallet(address: Address): Response[Boolean]
+  def deleteWallet(address: Address): IO[Boolean]
 
-  def changePassphrase(address: Address, oldPassphrase: String, newPassphrase: String): Response[Boolean]
+  def changePassphrase(address: Address, oldPassphrase: String, newPassphrase: String): IO[Boolean]
 }
 
-object PrivateAPI {
-  def apply(
-      keyStore: KeyStore[IO],
-      history: History[IO],
-      blockChainConfig: BlockChainConfig,
-      txPool: TxPool[IO],
-  ): IO[PrivateAPI] =
-    for {
-      unlockedWallets <- fs2.async.refOf[IO, Map[Address, Wallet]](Map.empty)
-    } yield
-      new PrivateApiImpl(
-        keyStore,
-        history,
-        blockChainConfig,
-        txPool,
-        unlockedWallets
-      )
-}

@@ -5,11 +5,10 @@ import cats.implicits._
 import jbok.codec.rlp.RlpCodec
 import jbok.codec.rlp.codecs._
 import jbok.core.History
-import jbok.core.Configs.{BlockChainConfig, MiningConfig, MonetaryPolicyConfig}
+import jbok.core.config.Configs.{BlockChainConfig, MiningConfig, MonetaryPolicyConfig}
 import jbok.core.consensus.{Consensus, ConsensusResult}
 import jbok.core.models.{Block, BlockHeader}
 import jbok.core.pool.BlockPool
-import jbok.core.validators.BlockValidator
 import jbok.crypto._
 import scodec.bits.ByteVector
 
@@ -21,7 +20,7 @@ class EthashConsensus[F[_]](
     miner: EthashMiner[F],
     ommersValidator: EthashOmmersValidator[F],
     headerValidator: EthashHeaderValidator[F]
-)(implicit F: Sync[F]) extends Consensus[F](history) {
+)(implicit F: Sync[F]) extends Consensus[F](history, blockPool) {
   val difficultyCalculator = new EthDifficultyCalculator(blockChainConfig)
   val rewardCalculator     = new EthRewardCalculator(MonetaryPolicyConfig())
 

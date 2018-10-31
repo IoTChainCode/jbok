@@ -45,8 +45,9 @@ object RpcServerMacro {
                 case Left(e) =>
                   IO.pure(JsonRPCResponse.invalidRequest(e.toString()).asJson.noSpaces)
                 case Right(req) =>
-                  $run.map {
-                    case Left(e) => e.copy(id = req.id).asJson.noSpaces
+                  $run.attempt.map {
+                    case Left(e: JsonRPCError) => e.copy(id = req.id).asJson.noSpaces
+                    case Left(e) => JsonRPCResponse.internalError(e.toString, Some(req.id)).asJson.noSpaces
                     case Right(x) => JsonRPCResponse.ok(req.id, x).asJson.noSpaces
                   }
               }
@@ -66,7 +67,8 @@ object RpcServerMacro {
         import cats.implicits._
         import jbok.network.json._
         import jbok.codec.json._
-        new RpcServer(${c.prefix.tree}.handlers ++ Map(..$handlers), ${c.prefix.tree}.queue)
+
+        ${c.prefix.tree}.addHandlers($handlers)
        """
     }
 
